@@ -1,178 +1,178 @@
 # The Neurons Are in Order (and They Shouldn't Be)
 
-![cover](images/cover.png)
+![The Neurons Are in Order](images/cover.png)
 
-I wasn't looking for this.
+**TL;DR.** The MLP neurons of Qwen3.5-0.8B are stored in what looks like order of importance. In every one of its 24 layers, the most active neurons are packed into the lowest indices. Across layers, 63% to 96% of each layer's 100 most active neurons sit in the first 512 of 3,584 positions, where chance would put 14%. The ordering is not just a statistic. Keeping only the first half of every MLP layer raises perplexity on Python code from 4.1 to 8.6. Keeping a random half raises it to 79, and keeping the last half raises it to over 400,000. The front half on its own still writes fluent, on-topic text, but it cannot finish solving a single programming problem. A random half outputs the letter "d", repeatedly.
 
-I was hunting for something else entirely: the neurons that make a small language model doubt itself. Qwen3.5-0.8B has a strange habit. It writes perfectly good code, then says *"Wait…"* and argues itself out of it. I wanted to find the parts of the network responsible.
+Nothing in standard training should produce this structure. We think it is a fingerprint of how the model was built, and it has practical consequences for compression and for interpretability research.
 
-My tools handed me a list: the 64 neurons in the model's last layer that mattered most for that behaviour.
+---
+
+We came across this while working on a different question. Our main project tries to make Qwen3.5-0.8B solve more coding problems with fewer tokens by editing a small number of its weights directly, without any training. The approach follows recent work on weight-space programming [1]. Part of that work means locating the neurons behind specific behaviours, in particular the model's habit of second-guessing correct answers.
+
+One of those searches returned the 64 neurons in the final layer most associated with overly long reasoning:
 
 ```text
 28, 84, 11, 234, 36, 6, 291, 2, 57, 77, 81, 66, 15, 160, 49, 176, ...
 ```
 
-I almost scrolled past it. Then I looked again.
+The layer has 3,584 neurons. A set of 64 important neurons should be spread across the whole range. Instead, 56 of the 64 had an index below 512. That is very unlikely to happen by chance, so we looked further.
 
-That layer has **3,584 neurons**, numbered 0 to 3,583. If you pick 64 of them that matter, their numbers should be scattered all over that range. Mine weren't. **56 of the 64 were below 512.** That's like rolling a seven-sided die 64 times and getting a one 56 times.
+## Neuron order should carry no information
 
-Dice don't do that. Something had loaded them.
+Each transformer layer in Qwen3.5-0.8B contains a gated MLP (SwiGLU [2]) with 3,584 hidden neurons. Neuron *j* reads the input through row *j* of the gate and up projections, and writes its output through column *j* of the down projection.
 
-## Neurons don't have assigned seats
+![Figure 1: permutation symmetry of an MLP layer](https://raw.githubusercontent.com/advikdivekar/qwen-neuron-order/main/images/fig1_symmetry.png)
 
-To see why this is strange, picture an orchestra.
+*Figure 1. Swapping two neurons, together with their rows and columns of weights, leaves the layer's function exactly unchanged. This permutation symmetry holds for any reordering of the 3,584 neurons.*
 
-Every musician sits in a numbered chair. But nobody assigned the chairs; people just sat down. If two violinists swap seats and take their sheet music with them, the concert sounds *exactly* the same. The chair number tells you nothing about who matters.
+This is a classical property of neural networks [3, 4]. Because every reordering of the neurons computes the same function, gradient descent from a random initialisation has no mechanism for placing important neurons at low indices. In an ordinarily trained model, the index of a neuron should tell you nothing about it.
 
-Neurons in a language model work the same way. Each of Qwen's 24 layers has a block of 3,584 neurons. Swap neuron #5 with neuron #3,000, carry their weights along, and the model computes the identical thing, to the last decimal. Mathematicians call this **permutation symmetry**. When a model is trained from random noise, nothing pushes the important neurons toward any particular number.
+## Experiment 1: Is activity related to neuron index?
 
-So neuron #0 should be as ordinary as neuron #2,817.
+**Setup.** We recorded the activation of every MLP neuron (24 layers × 3,584 neurons) while the model answered 128 programming problems from MBPP [5], and measured each neuron's average activation magnitude.
 
-It isn't.
+![Figure 2: activity by neuron index](https://raw.githubusercontent.com/advikdivekar/qwen-neuron-order/main/images/fig2_activity.png)
 
-## The first chairs are where the music happens
+*Figure 2. (a) Average activation per block of 64 neurons, relative to the layer mean, for three layers. (b) For each layer, the share of its 100 most active neurons whose index is below 512. The dashed line marks the share expected by chance.*
 
-I watched every neuron in the model while it read about 185,000 tokens: its own reasoning, Python code and plain English. For each one I asked a simple question: **how busy are you?**
+Activity declines steadily with index. In the final layer, neurons 0 to 511 are on average 9× more active than neurons 3,072 to 3,583. The effect is not limited to a few layers. In every layer, between 63% and 96% of the 100 most active neurons have an index below 512, against 14% expected by chance.
 
-![How busy each block of neurons is, by neuron number, for three layers](https://raw.githubusercontent.com/advikdivekar/qwen-neuron-order/main/images/activity_by_index.png)
+![Figure 3: heatmap of activity across all layers](https://raw.githubusercontent.com/advikdivekar/qwen-neuron-order/main/images/fig3_heatmap.png)
 
-The line falls off a cliff. In the last layer, the first 64 neurons are **7× busier** than the layer's average. Neurons in the back third work at about a third of the average. Of that layer's 100 busiest neurons, **93 sit in the first 512 seats**. Chance would put about 14 there.
+*Figure 3. Average activation for every layer (rows) and every block of 128 neurons (columns), relative to the layer mean. All 24 layers show the same concentration at low indices, and the gradient becomes steeper with depth.*
 
-Maybe that's one weird layer? Here are all 24:
+The weights carry the same signature without running the model at all: in the deeper layers, the norm of each neuron's output weights varies smoothly with its index. Across the model, a neuron among the first 512 is active on about 25% of tokens, against 8% for a neuron among the last 512.
 
-![Heatmap: every layer has the same dark band at the front](https://raw.githubusercontent.com/advikdivekar/qwen-neuron-order/main/images/heatmap.png)
+## Experiment 2: Does index order encode importance?
 
-Every row is a layer, and every row has the same dark stripe down the left side. The pattern gets *stronger* the deeper you go. Across the whole model, a neuron in the first 512 seats fires on **25%** of tokens; one in the last 512 fires on **8%**.
+High activity does not imply importance. A neuron can be busy and still contribute little. To test importance directly, we removed neurons and measured the damage.
 
-The orchestra isn't seated randomly. Somebody put the principal players in the front row.
+**Setup.** A neuron is removed by zeroing its output weights, which is exactly equivalent to deleting it. We applied four selection rules to all 24 layers simultaneously, keeping 25%, 50% or 75% of the neurons. We then measured perplexity on Python code (MBPP reference solutions) and on English prose; lower is better.
 
-## The experiment: send half the orchestra home
+![Figure 4: the four selection rules](https://raw.githubusercontent.com/advikdivekar/qwen-neuron-order/main/images/fig4_setup.png)
 
-"Busy" isn't the same as "important". A drummer can be loud without carrying the melody. So I ran the test that settles it.
+*Figure 4. The selection rules, illustrated for the 50% case. "Most active" uses the activation measurements from Experiment 1, chosen separately for each layer.*
 
-I switched off neurons in **all 24 layers at once** and measured how much the model suffered. The measure is *perplexity*, roughly how confused the model is by real text: lower is better, and the untouched model scores **4.1** on Python code. I tried three ways of choosing who goes home:
+![Figure 5: perplexity after removing neurons](https://raw.githubusercontent.com/advikdivekar/qwen-neuron-order/main/images/fig5_truncation.png)
 
-- keep the **first** neurons, by seat number;
-- keep a **random** set;
-- keep the **last** neurons.
+*Figure 5. Perplexity after keeping a fraction of the neurons in every MLP layer (log scale). The shaded band shows the range over three random draws.*
 
-![Perplexity after keeping the first, a random, or the last part of every layer](https://raw.githubusercontent.com/advikdivekar/qwen-neuron-order/main/images/truncation.png)
+| Neurons kept | First (by index) | Random (3 draws) | Most active (measured) | Last (by index) |
+|---|---|---|---|---|
+| 100% | 4.1 | 4.1 | 4.1 | 4.1 |
+| 75% | **5.5** | 9.8 to 13.7 | | |
+| 50% | **8.6** | 60 to 91 | 9.0 | 405,510 |
+| 25% | **16.4** | 3,237 to 17,788 | | |
 
-| Neurons kept | First ones | Random ones | Last ones |
-|---|---|---|---|
-| 75% | **5.5** | 9.8 – 13.7 | |
-| 50% | **8.6** | 60 – 91 | **405,510** |
-| 25% | **16.4** | 3,237 – 17,788 | |
+*Perplexity on Python code. English prose follows the same pattern: 71 for the first half, 333 to 569 for a random half, and 448,224 for the last half.*
 
-Read that middle row again.
+Three observations:
 
-- **The front half beats a random three-quarters.** Throwing away *half* the model in seat order (8.6) does less damage than throwing away a random *quarter* (around 11).
-- **The back half is nothing on its own.** Keep only seats 1,792 to 3,583 and perplexity explodes from 4 to over **400,000**. That's no longer a language model; it's a random-number generator with a vocabulary.
-- **The seat order beat my own ranking.** I also tried keeping the 50% of neurons I had *measured* as busiest. It did slightly worse (9.0) than plain seat order (8.6). Whoever arranged these neurons knew more about them than my measurements did.
+1. **The first half outperforms a random three-quarters.** Removing half of every layer in index order (8.6) costs less than removing a random quarter (9.8 to 13.7).
+2. **The last half alone does not function.** Perplexity rises from 4.1 to over 400,000, higher than the 248,320 that a uniform guess over the entire vocabulary would score.
+3. **Index order beats our own measurement.** Keeping the 50% of neurons we measured as most active gives 9.0 on code and 90 on prose, slightly worse than plain index order (8.6 and 71). Whatever produced the ordering had better information about the neurons than activation statistics do.
 
-## The "d d d d" moment
+## Experiment 3: What does the reduced model produce?
 
-Numbers are one thing. I wanted to *see* it. So I gave the same coding problem to three versions of the model: check whether any two numbers in a list are closer than a threshold.
+Perplexity is an aggregate. To see what the reduced models actually do, we gave each version the first HumanEval [6] problem and let it generate.
 
-**The full model** plans like a careful student:
+![Figure 6: outputs of the full and reduced models](https://raw.githubusercontent.com/advikdivekar/qwen-neuron-order/main/images/fig6_outputs.png)
 
-```text
-Let me analyze the problem:
-1. We need to check if in a list of numbers, are any two numbers closer
-   to each other than a given threshold
-2. Two numbers are "closer" if their absolute difference is less than or
-   equal to the threshold
+*Figure 6. The opening of each model's response to the same prompt.*
+
+The full model starts with a structured analysis. The model reduced to its first half produces grammatical, on-topic text and even begins writing the correct function signature. The randomly reduced model outputs a single character repeatedly.
+
+We then evaluated the first-half model on the first 16 HumanEval problems. It solved none. In all 16 cases, the response entered a repetitive loop and ran to the 2,048-token limit, for example: *"The function's function is defined, and the `count_distinct_characters` is a function that returns the number of distinct characters…"*. The full model solves 5 of the same 16 problems.
+
+The front of each layer is enough to preserve language: grammar, topic and code syntax survive. Multi-step problem solving needs the remaining neurons.
+
+## Experiment 4: What do individual neurons do?
+
+**Setup.** We profiled every neuron on about 185,000 tokens of the model's own reasoning traces, Python code and English text. For each neuron we recorded how often it is active, how selectively it responds to particular tokens, and the contexts that activate it most strongly.
+
+First, where do the different kinds of neurons sit?
+
+![Figure 7: where generalists and specialists sit](https://raw.githubusercontent.com/advikdivekar/qwen-neuron-order/main/images/fig7_where.png)
+
+*Figure 7. Index position of each layer's 1% most active neurons (blue) and 1% most token-selective neurons (orange), pooled over all layers.*
+
+The two groups behave very differently. Of the most active neurons, 98% are among the first 512. Token-selective neurons, which respond strongly to one kind of token and stay quiet otherwise, are spread across the whole range, with only a mild tilt toward the front (19% in the first block, 9% in the last). The ordering ranks neurons by how much they contribute overall, not by what they represent.
+
+![Figure 8: six neurons and the contexts that activate them](https://raw.githubusercontent.com/advikdivekar/qwen-neuron-order/main/images/fig8_neurons.png)
+
+*Figure 8. Six neurons, each shown on the passage of the model's own reasoning where it responds most strongly. Shading shows activation magnitude relative to that neuron's peak. Neurons are named layer.neuron, so L16.N2734 is neuron 2,734 in layer 16.*
+
+A few of these are worth describing in more detail.
+
+- **L19.N0** sits at index 0 and is active on every token. Its average magnitude is 61× that of the median neuron in its layer. Single neurons with outsized, nearly constant activations have been documented across many language models as *massive activations* [7]. They appear to act as fixed reference points rather than as carriers of specific content.
+- **L16.N2734** is 66× more active on the token "Wait" than on other tokens in the model's reasoning, and inactive on 90% of text. This is relevant to our main project: elsewhere we found that the model says "Wait" after correct code almost as often as after incorrect code.
+- **L14.N1542** responds in the same way to "Actually", "Wait" and "However" when they open a sentence. It appears to encode the act of revising a previous statement rather than any single word.
+- **L15.N556** activates on the line break immediately before a code block, after phrases such as "Let me write the function:". It responds before any code has been written.
+
+Other specialists include two neurons (L0.N545 and L15.N1126) that are about 76× more active on `def` than on average, one (L0.N1427) that is 67× more active on `return`, and one (L0.N744) that responds to `</think>`, the token where the model ends its reasoning and begins its answer.
+
+Neurons are frequently polysemantic [8], so these labels describe the strongest pattern we observed, not a neuron's complete function.
+
+## What could produce this ordering?
+
+We do not know how Qwen3.5-0.8B was built, so this section is a hypothesis. Two established techniques would leave exactly this signature.
+
+**Structured pruning from a larger model.** Methods such as Minitron [9] and Sheared LLaMA [10] rank the neurons of a larger model by importance, keep the highest-ranked ones, and retrain with distillation. If the retained neurons are stored in rank order, the smaller model inherits a sorted MLP.
+
+**Nested-width training.** Methods such as MatFormer [11], building on Matryoshka representation learning [12], train a model so that its first *k* neurons form a functional smaller model by themselves. Under this scheme, the front of every layer is a compact model by design.
+
+The results in Experiments 2 and 3 are consistent with either explanation: cutting along the index order preserves far more of the model than any other cut we tried.
+
+## Implications
+
+- **Compression without training.** If each layer's front portion is a ranked core, the model can be shrunk by slicing alone. The half-width model is weaker today (perplexity 8.6 against 4.1, no solved problems), but it is a far better starting point for recovery than any random subset.
+- **A map for interpretability.** In this model, the neurons that carry most of the computation are concentrated in a known region of every layer.
+- **A pitfall for neuron-level studies.** Many interpretability and pruning studies use a random set of neurons as a control, assuming neuron indices are exchangeable. In a model with this structure, that assumption fails, and comparisons against index-based subsets can be misleading.
+
+## What comes next
+
+This is a side result from a larger, ongoing project. Our main goal is to get more solved problems per token from Qwen3.5-0.8B by editing a very small number of its weights directly, without training. Earlier work in the project found that a large share of the model's tokens is spent reconsidering a first draft, and that this extra reasoning rarely changes the outcome. The findings here feed into that work in three ways, and we are pursuing each of them next.
+
+1. **Targeted edits to the doubt circuitry.** L16.N2734 and L14.N1542 are concrete candidates for the second-guessing behaviour. Next, we will test whether adjusting a handful of neurons like these reduces wasted reasoning without hurting accuracy.
+2. **A free draft model.** If the front of every layer is a functional core, a sliced copy of the model could serve as a cheap draft model for speculative decoding [13], with the full model verifying its proposals. That would reduce the cost of every answer without changing the answers themselves.
+3. **Where the ordering comes from.** We plan to check whether other members of the Qwen3.5 family show the same structure, and whether the hidden smaller model can be recovered cleanly.
+
+We will report results as they come in.
+
+## Limitations
+
+- All results are from a single model, Qwen3.5-0.8B. Other models, including other Qwen3.5 sizes, have not yet been checked.
+- Perplexity was measured on a modest amount of text: about 21,000 tokens of code and 18,000 tokens of prose.
+- The problem-solving evaluation of the half-width model covers 16 HumanEval problems. That is enough to show a collapse from 5 solved to 0, but not to estimate a precise success rate.
+- Neuron profiles come from about 185,000 tokens, most of them code and reasoning about code. Profiles on other kinds of text may differ.
+- "Sorted by importance" is our interpretation of the evidence. We have not confirmed how the model was produced.
+
+## References
+
+1. Takehi, R., Teoh, J., Zhang, A. and Khattab, O. (2026). *Sparks of Weight-Space Programming: LLMs can natively read & write neural network weights.* Blog post, MIT CSAIL. https://rikiyat.github.io/blog/weight-space-programming/
+2. Shazeer, N. (2020). *GLU Variants Improve Transformer.* arXiv:2002.05202.
+3. Hecht-Nielsen, R. (1990). *On the algebraic structure of feedforward network weight spaces.* In Advanced Neural Computers, Elsevier.
+4. Ainsworth, S., Hayase, J. and Srinivasa, S. (2023). *Git Re-Basin: Merging Models modulo Permutation Symmetries.* ICLR 2023.
+5. Austin, J. et al. (2021). *Program Synthesis with Large Language Models.* arXiv:2108.07732.
+6. Chen, M. et al. (2021). *Evaluating Large Language Models Trained on Code.* arXiv:2107.03374.
+7. Sun, M., Chen, X., Kolter, J. Z. and Liu, Z. (2024). *Massive Activations in Large Language Models.* COLM 2024. arXiv:2402.17762.
+8. Elhage, N. et al. (2022). *Toy Models of Superposition.* Transformer Circuits Thread.
+9. Muralidharan, S. et al. (2024). *Compact Language Models via Pruning and Knowledge Distillation.* NeurIPS 2024. arXiv:2407.14679.
+10. Xia, M., Gao, T., Zeng, Z. and Chen, D. (2024). *Sheared LLaMA: Accelerating Language Model Pre-training via Structured Pruning.* ICLR 2024.
+11. Devvrit, Kudugunta, S. et al. (2023). *MatFormer: Nested Transformer for Elastic Inference.* arXiv:2310.07707.
+12. Kusupati, A. et al. (2022). *Matryoshka Representation Learning.* NeurIPS 2022.
+13. Leviathan, Y., Kalman, M. and Matias, Y. (2023). *Fast Inference from Transformers via Speculative Decoding.* ICML 2023.
+
+## Citation
+
+```bibtex
+@misc{divekar2026neuronorder,
+  title        = {The Neurons Are in Order (and They Shouldn't Be)},
+  author       = {Divekar, Advik},
+  year         = {2026},
+  month        = nov,
+  howpublished = {\url{https://github.com/advikdivekar/qwen-neuron-order}},
+  note         = {Blog post}
+}
 ```
-
-**The front half only** is fluent, on topic, and even starts writing the right function:
-
-```text
-We need to determine the Python function of `has_close_elements`, which is a
-standard Python function, and it's to be in a single python code block.
-Let's first start to make the code for the function.
-
-def has_close_elements(numbers: List[float], threshold: float) -> bool:
-```
-
-**A random half:**
-
-```text
-dn
-d
-d
-d
-d
-d
-```
-
-That's the whole answer. Just `d`, until it runs out of room.
-
-But the front-half model has a problem of its own. It sounds right, yet it can't *finish* a thought. On 16 coding problems it solved **zero**, and every single answer went in circles until it hit the length limit:
-
-> *"The function's function is defined, and the `count_distinct_characters` is a function that returns the number of distinct characters in a string. The function's function is defined, and the…"*
-
-(The full model solves 5 of those 16.)
-
-So the front of each layer holds the model's **language**: grammar, topic, even Python syntax. The **reasoning** needs the rest of the orchestra.
-
-## Meet the cast
-
-Once you know where to look, individual neurons turn out to have surprisingly readable personalities. I'll name them by layer and seat: **L23.N9** is seat 9 in layer 23. Each nickname comes from the text that makes that neuron fire hardest.
-
-### The front row: workhorses that never rest
-
-| | Neuron | What it does |
-|---|---|---|
-| 🥁 **The Metronome** | L19.N0 | Fires on **every single token**, at **61×** the strength of a typical neuron in its layer. It peaks on plain glue words like *"the"* and *"and"*. It's less a detector than a steady beat that the rest of the layer plays against. |
-| 📋 **The Outline Keeper** | L23.N9 | Fires on the full stop in the model's private to-do list: *"3. Draft"*, *"4. Refine"*, *"5. Final"*. It keeps track of where the model is in its own plan. |
-| ⇥ **The Indenter** | L23.N84 | Its peak is among the 50 strongest of all 86,000 neurons in the model, and it fires on… the spaces that indent Python code. |
-| 🔢 **The Long-Number Reader** | L23.N11 | Lights up inside long numbers such as *1.5707963267948966*. |
-| 🚪 **The Turn Detector** | L3.N0 | Jolts when a new chat turn begins, especially right after a block of code. |
-
-### The specialists: quiet until their moment
-
-These sleep through most text and wake for one kind of token. Unlike the workhorses, **they sit in every part of the layer**, front and back alike. The front row isn't where the specialists live; it's where the busy generalists live.
-
-| | Neuron | What it does |
-|---|---|---|
-| ✋ **The Wait Neuron** | L16.N2734 | **56×** more active on *"Wait"* than on an average token, and silent for 90% of text. In a model that doubts its correct answers almost as often as its wrong ones, this one is a prime suspect. |
-| 🔄 **The Second-Guesser** | L14.N1542 | Responds identically to *"Actually"*, *"Wait"* and *"However"* at the start of a bullet point. To this neuron they're all the same move: *take back what I just said.* |
-| 🔮 **Code Is Coming** | L15.N556 | Fires on the blank line right after *"Let me write the function:"*, before a single character of code exists. It knows what's next. |
-| 🚧 **The Fence Opener** | L15.N1265 | Fires on the ```` ``` ```` that opens a code block, especially after *"Let me fix this:"*. |
-| 🏷️ **The `def` Detectors** | L0.N545, L15.N1126 | About **76×** more active on `def` than on anything else. One sits in the very first layer, one in the middle. |
-| ↩️ **The `return` Detector** | L0.N1427 | 67× more active on `return`. |
-| 🧠 **The `</think>` Detector** | L0.N744 | Fires on `</think>`, the exact moment the model stops thinking and starts answering. |
-
-A fair warning about nicknames: neurons rarely do just one thing. These describe each neuron's strongest habit on the text I showed it, not its whole job description.
-
-## So who arranged the orchestra?
-
-Here's where I have to be honest: **I don't know how Qwen built this model.** But two well-known recipes leave exactly this fingerprint.
-
-**Suspect #1: it was carved out of a bigger model.** Techniques like NVIDIA's *Minitron* take a large model, rank its neurons by importance, keep the best and retrain. If the survivors are stored in rank order, the small model inherits a sorted orchestra.
-
-**Suspect #2: it was trained as a set of nesting dolls.** *Matryoshka*-style training (MatFormer, for example) teaches a model so that its first *k* neurons work as a complete smaller model on their own. The front of every layer would then be, by design, a model within the model.
-
-Our front-half experiment fits either story. Cut along the seams and you get something that still speaks; cut anywhere else and it falls apart.
-
-And the Metronome is its own clue. Single, enormously loud neurons like L19.N0 show up across many language models; researchers call them **massive activations**. They seem to act as fixed reference points rather than carrying meaning.
-
-## Why this matters
-
-- **There may be a smaller model hiding inside this one.** If the front of every layer is a ranked core, you can shrink the model just by slicing, with no retraining. Today the slice can talk but not reason, yet it's a far better starting point than a random cut.
-- **Interpretability gets a treasure map.** If you're hunting for the neurons that matter in this model, start at the front.
-- **A trap for researchers.** Plenty of studies use "a random set of neurons" as a baseline, assuming seat numbers mean nothing. In a model like this, that assumption is quietly wrong.
-
-## What I'm *not* claiming
-
-- This is one model. I haven't checked its siblings yet.
-- The neuron profiles come from about 185,000 tokens, mostly code and coding traces. Other kinds of text might reveal other personalities.
-- "Sorted by importance" is the best explanation for the evidence, not a confession. Only the people who built the model know for sure.
-
----
-
-I set out to find why a small model doubts itself. I'm still working on that one. Along the way I found that its neurons are seated in order of importance, that half of them can hold a conversation but not a thought, and that one neuron spends its entire life saying *"Wait."*
-
-That's the fun of looking inside these things. You go looking for one answer, and the model hands you a different mystery.
-
-*If you've seen this kind of neuron ordering in other models, or know how Qwen3.5 was built, I'd love to hear about it in the comments.*
