@@ -1,9 +1,9 @@
 ---
-title: "Sorted by Importance: The Hidden Neuron Ranking Inside Qwen3.5-0.8B"
+title: "Qwen3.5-0.8B's Neurons Are Secretly Ranked"
 published: false
-description: In Qwen3.5-0.8B, the first half of every MLP layer does most of the work. Keep it and the model still writes fluent text; keep a random half and it outputs a single letter.
+description: "Keep the first half of every layer and the model still writes fluent text. Keep a random half and all it says is the letter d."
 tags: machinelearning, llm, interpretability, ai
-cover_image: https://raw.githubusercontent.com/advikdivekar/qwen-neuron-order/1c9e111094474f0683bddce8749400cb5171f8f2/images/v3/cover.png
+cover_image: https://raw.githubusercontent.com/advikdivekar/qwen-neuron-order/4d9c1eb693c2a5a0dd45811982120bf87b40b2f4/images/v4/cover.png
 ---
 
 **TL;DR.** The MLP neurons of Qwen3.5-0.8B appear to be stored in order of importance. In every one of its 24 layers, the most active neurons are packed into the lowest indices. Depending on the layer, 63% to 96% of the 100 most active neurons sit in the first 512 of 3,584 positions, where chance would put 14%. The ordering is also visible in the raw weights, before the model processes a single token. It matters in practice:
@@ -202,8 +202,8 @@ I will post the results as they come in.
 ## Citation
 
 ```bibtex
-@misc{divekar2026sorted,
-  title        = {Sorted by Importance: The Hidden Neuron Ranking Inside Qwen3.5-0.8B},
+@misc{divekar2026ranked,
+  title        = {Qwen3.5-0.8B's Neurons Are Secretly Ranked},
   author       = {Divekar, Advik},
   year         = {2026},
   month        = nov,

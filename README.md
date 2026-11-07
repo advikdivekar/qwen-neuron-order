@@ -1,6 +1,6 @@
-# Sorted by Importance: The Hidden Neuron Ranking Inside Qwen3.5-0.8B
+# Qwen3.5-0.8B's Neurons Are Secretly Ranked
 
-![Sorted by Importance](images/v3/cover.png)
+![Qwen3.5-0.8B's Neurons Are Secretly Ranked](images/v4/cover.png)
 
 **TL;DR.** The MLP neurons of Qwen3.5-0.8B appear to be stored in order of importance. In every one of its 24 layers, the most active neurons are packed into the lowest indices. Depending on the layer, 63% to 96% of the 100 most active neurons sit in the first 512 of 3,584 positions, where chance would put 14%. The ordering is also visible in the raw weights, before the model processes a single token. It matters in practice:
 
@@ -198,8 +198,8 @@ I will post the results as they come in.
 ## Citation
 
 ```bibtex
-@misc{divekar2026sorted,
-  title        = {Sorted by Importance: The Hidden Neuron Ranking Inside Qwen3.5-0.8B},
+@misc{divekar2026ranked,
+  title        = {Qwen3.5-0.8B's Neurons Are Secretly Ranked},
   author       = {Divekar, Advik},
   year         = {2026},
   month        = nov,
